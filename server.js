@@ -7,7 +7,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import zlib from 'zlib';
 import { promisify } from 'util';
-import weatherHandler from './api/weather.js';
 
 const gunzip = promisify(zlib.gunzip);
 const __filename = fileURLToPath(import.meta.url);
@@ -166,7 +165,38 @@ app.get('/api/nearby', async (req, res) => {
   }
 });
 
-app.get('/api/weather', (req, res) => weatherHandler(req, res));
+app.get('/api/weather', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const raw = req.query.url;
+  if (!raw) return res.status(400).send('Missing url parameter');
+  let target;
+  try {
+    target = new URL(Array.isArray(raw) ? raw[0] : raw);
+    if (target.protocol !== 'https:') throw new Error('Only HTTPS is allowed');
+    if (target.hostname !== 'aviationweather.gov') throw new Error('Only aviationweather.gov allowed');
+    if (!target.pathname.startsWith('/api/data/')) throw new Error('Only /api/data endpoints are allowed');
+  } catch (err) {
+    return res.status(400).send(err.message || 'Invalid url parameter');
+  }
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    const upstream = await fetch(target.toString(), {
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json,text/plain,*/*',
+        'User-Agent': 'DroneTogs weather proxy contact: www.dronetogs.com'
+      }
+    });
+    clearTimeout(timer);
+    const text = await upstream.text();
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json; charset=utf-8');
+    res.setHeader('Cache-Control', target.pathname.includes('/taf') ? 'public, max-age=900' : 'public, max-age=180');
+    return res.status(upstream.status).send(text);
+  } catch (err) {
+    return res.status(502).send(err?.message || 'Weather proxy failed');
+  }
+});
 app.use(express.static(__dirname, { extensions: ['html'] }));
 app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
